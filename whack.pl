@@ -164,6 +164,12 @@ exit; # or "way out" for those in the UK
     to be open sourced. It was initially developed using
     GSG time and equipment.
 
+    whack.pl is licensed under a
+        Creative Commons Attribution 3.0 Unported License
+        http://creativecommons.org/licenses/by/3.0/
+    and is based on a work at
+        https://github.com/wickline/whack
+
     TODO:
         --help
         real pod
