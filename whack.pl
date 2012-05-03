@@ -14,6 +14,8 @@ GetOptions(
     'G=s'           => \( my $Path_regex = '\.(?:pm|pl|t)\z' ),
     'group-by-path' => \( my $Group_by_path = 0              ),
     'ppi-cache=s'   => \( my $PPI_cache                      ),
+    'raw'           => \( my $Should_show_raw_metrics        ),
+    'sub=s'         => \( my $Subroutine_name                ),
     'top=i'         => \( my $Top = 1                        ),
     'verbose'       => \( my $Should_use_verbose_output = 0  ),
 );
@@ -30,7 +32,7 @@ exit; # or "way out" for those in the UK
     Example:
 
         # the top 5 subs to fix in foo-related files:
-        subpar.pl --top=5 -G='[fF]oo' lib t
+        whack.pl --top=5 -G='[fF]oo' lib t
 
     When working to improve code in some of the dustier
     corners of your repo, it can be difficult to know where
@@ -124,6 +126,23 @@ exit; # or "way out" for those in the UK
         For this reason, we default to showing just
         the rankings and not the scores.
 
+    --raw
+        implies --details, but just shows the raw
+        metrics (not the score or the per-metric
+        detail scores). This also supresses the
+        display of the rank. --raw is most likely
+        useful when you want to repeatedly run the
+        script to see how much you've improved a
+        specific subroutine. See also --sub below.
+
+    --sub
+        to specify the name of the sub for which you
+        wish to see output. This can make sense in the
+        case of --raw where you are working on some
+        improvements for just one sub, or if you are
+        comparing different versions of the same sub
+        in different files.
+
     --ppi-cache=path_to_dir
         to use a cache to speed up PPI
 
@@ -209,14 +228,19 @@ sub whack {
     warn "searched in zero files\n"
         unless $num_files_visited;
 
-    my $aggregates = calc_aggregates_from_scores( $metrics, $scores );
-    fill_in_relative_scores( $metrics, $scores, $aggregates );
+    unless ( $Should_show_raw_metrics ) {
+        my $aggregates = calc_aggregates_from_scores( $metrics, $scores );
+        fill_in_relative_scores( $metrics, $scores, $aggregates );
+    }
 
     output_subar_report( $metrics, $scores );
 }
 
 sub validate_options
 {
+    $Should_show_score_details = 1
+        if $Should_show_raw_metrics;
+
     if ( defined $Top ) {
         die "--top must be a positive integer if provided"
             unless $Top > 0;
@@ -233,6 +257,9 @@ sub validate_options
             s/ at \S+ line \d+.*//s;
             die( "Invalid -G regex '$Path_regex':\n  $_" );
         }
+    }
+    if ( $Should_show_raw_metrics && $Top > 1) {
+        die "--raw skips score calc. Incompatible w/ --top";
     }
 }
 
@@ -296,7 +323,10 @@ sub is_searchable_file { # shamelessly stole this from ack
     return 1;
 }
 
-sub should_show_rankings { $Top > 1 }
+sub should_show_rankings {
+    return 0 if $Should_show_raw_metrics;
+    return $Top > 1;
+}
 
 sub output_subar_report {
     my ( $metrics, $scores ) = @_;
@@ -362,9 +392,13 @@ sub get_path_scores_from_subpar_list {
 
 sub score_details_for_subpar_info {
     my ( $metrics, $legend, $info ) = @_;
-    my $formatted_score = sprintf( 'Score: %.2f;  ', $info->{'score'} );
+    my $formatted_score = $Should_show_raw_metrics
+        ? ''
+        : sprintf( 'Score: %.2f;  ', $info->{'score'} )
+        ;
+    my $format = $Should_show_raw_metrics ? '%s' : '%.2f';
     return $formatted_score . join( '  ', map {
-        sprintf( '%s: %.2f', $_, $info->{'details'}{ $legend->{$_} } );
+        sprintf( "%s: $format", $_, $info->{'details'}{ $legend->{$_} } );
     } sort keys %$legend);
 }
 
@@ -392,19 +426,22 @@ sub extract_details_for_subpar_subs {
     for my $path ( keys %$scores ) {
         for my $sub_name ( keys %{ $scores->{$path} } ) {
             my $score = $scores->{$path}{$sub_name}{'score'};
-            next unless $score > 0;
+            next unless $Should_show_raw_metrics || $score > 0;
 
             push @subpar, {
                 path     => $path,
                 sub_name => $sub_name,
                 score    => $score,
-                details  => $scores->{$path}{$sub_name}{'standard_deviations'},
+                details  => ( $Should_show_raw_metrics
+                    ? $scores->{$path}{$sub_name}
+                    : $scores->{$path}{$sub_name}{'standard_deviations'},
+                )
             };
         }
     }
 
     @subpar = sort {
-        $b->{'score'} <=> $a->{'score'}
+        ( $Should_show_raw_metrics ? 0 : $b->{'score'} <=> $a->{'score'} )
         ||
         $a->{'path'} cmp $b->{'path'}
         ||
@@ -493,8 +530,8 @@ sub score_dimensions_for_document_at_path {
 
     my $sub_nodes = $doc->find( sub {
         my $is_match = $_[1]->isa( 'PPI::Statement::Sub' )
-            and $_[1]->name()  # skip anon subs
-            and $_[1]->block() # skip fwd declarations
+            && $_[1]->name()  # skip anon subs
+            && $_[1]->block() # skip fwd declarations
             ;
         return $is_match ? 1 : 0;
     });
@@ -507,15 +544,21 @@ sub score_dimensions_for_document_at_path {
         return;
     }
 
-    return({ map {
-        my $sub_node = $_;
-        my $sub_name = $sub_node->name();
-        $sub_name => {
-            map {
-                $_ => $metrics->{$_}->( $sub_node, $path, $sub_name );
-            } keys %$metrics
-        };
-    } @$sub_nodes });
+    return({
+        map {
+            my $sub_node = $_;
+            my $sub_name = $sub_node->name();
+            $sub_name => {
+                map {
+                    $_ => $metrics->{$_}->( $sub_node, $path, $sub_name );
+                } keys %$metrics
+            };
+        }
+        grep {
+            !defined( $Subroutine_name ) || $_->name() eq $Subroutine_name;
+        }
+        @$sub_nodes
+    });
 }
 
 sub determine_length_of_element {
